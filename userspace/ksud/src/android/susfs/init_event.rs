@@ -44,15 +44,16 @@ enum CeAvailability {
 }
 
 pub fn on_boot_completed() {
-    let has_ce_sensitive_entries = has_ce_sensitive_config_entries();
+    let config = config::read_config();
 
-    if is_user_0_ce_ready() {
-        apply_after_ce_available("user-0-ce-available-at-boot-completed");
-    } else if has_ce_sensitive_entries {
+    if has_ce_sensitive_config_entries(&config) {
+        if try_apply_after_ce_available(&config, "user-0-ce-available-at-boot-completed") {
+            return;
+        }
         wait_for_user_0_ce_available();
     } else {
         info!("{USER_0_CE_AVAILABLE_PROP} is unavailable or not required");
-        apply_after_ce_available("boot-completed-without-ce-property");
+        apply_config_after_ce_available(&config, "boot-completed-without-ce-property");
     }
 }
 
@@ -63,36 +64,63 @@ pub fn on_services() {
     // apply_sus_maps(&config);
 }
 
-fn apply_sus_paths(config: &Data) {
+fn apply_sus_paths(config: &Data) -> bool {
+    let mut success = true;
+
     for sus_path in &config.sus_path.sus_path {
         if sus_path.trim().is_empty() {
             continue;
         }
-        apply_sus_path_entry(&api::SusPathType::Normal, "sus_path", sus_path);
+        if !apply_sus_path_entry(&api::SusPathType::Normal, "sus_path", sus_path) {
+            success = false;
+        }
     }
     for sus_path_loop in &config.sus_path.sus_path_loop {
         if sus_path_loop.trim().is_empty() {
             continue;
         }
-        apply_sus_path_entry(&api::SusPathType::Loop, "sus_path_loop", sus_path_loop);
+        if !apply_sus_path_entry(&api::SusPathType::Loop, "sus_path_loop", sus_path_loop) {
+            success = false;
+        }
+    }
+
+    success
+}
+
+fn apply_sus_path_entry(path_type: &api::SusPathType, label: &str, path: &str) -> bool {
+    match api::add_sus_path(path_type, &path) {
+        Ok(()) => true,
+        Err(e) if is_already_applied_error(&e) => {
+            info!("{label} '{path}' is already applied");
+            true
+        }
+        Err(e) => {
+            warn!("failed to add {label} '{path}': {e}");
+            false
+        }
     }
 }
 
-fn apply_sus_path_entry(path_type: &api::SusPathType, label: &str, path: &str) {
-    if let Err(e) = api::add_sus_path(path_type, &path) {
-        warn!("failed to add {label} '{path}': {e}");
-    }
-}
+fn apply_sus_maps(config: &Data) -> bool {
+    let mut success = true;
 
-fn apply_sus_maps(config: &Data) {
     for sus_map in &config.sus_map {
         if sus_map.trim().is_empty() {
             continue;
         }
-        if let Err(e) = api::add_sus_map(sus_map.as_str()) {
-            warn!("failed to add sus_map '{sus_map}': {e}");
+        match api::add_sus_map(sus_map.as_str()) {
+            Ok(()) => {}
+            Err(e) if is_already_applied_error(&e) => {
+                info!("sus_map '{sus_map}' is already applied");
+            }
+            Err(e) => {
+                warn!("failed to add sus_map '{sus_map}': {e}");
+                success = false;
+            }
         }
     }
+
+    success
 }
 
 pub fn on_post_fs_data() {
@@ -130,30 +158,64 @@ pub fn on_post_mount() {
     apply_kstat_updates(&config);
 }
 
-fn apply_after_ce_available(reason: &str) {
-    let config = config::read_config();
-
+fn apply_config_after_ce_available(config: &Data, reason: &str) -> bool {
     info!("applying susfs CE-sensitive entries for {reason}");
-    apply_sus_paths(&config);
-    apply_sus_maps(&config);
-    apply_sus_kstat_additions(&config);
-    apply_kstat_updates(&config);
+
+    let mut success = true;
+    if !apply_sus_paths(config) {
+        success = false;
+    }
+    if !apply_sus_maps(config) {
+        success = false;
+    }
+    if !apply_sus_kstat_additions(config) {
+        success = false;
+    }
+    if !apply_kstat_updates(config) {
+        success = false;
+    }
+
+    if success {
+        info!("applied susfs CE-sensitive entries for {reason}");
+    }
+    success
 }
 
-fn apply_sus_kstat_additions(config: &Data) {
+fn try_apply_after_ce_available(config: &Data, reason: &str) -> bool {
+    if !is_user_0_ce_ready(config) {
+        return false;
+    }
+
+    if !are_configured_paths_available(config) {
+        return false;
+    }
+
+    apply_config_after_ce_available(config, reason)
+}
+
+fn apply_sus_kstat_additions(config: &Data) -> bool {
+    let mut success = true;
+
     for sus_kstat in &config.kstat.sus_kstat {
         if sus_kstat.trim().is_empty() {
             continue;
         }
-        if let Err(e) = api::add_sus_kstat(sus_kstat.as_str()) {
-            warn!("failed to add sus_kstat '{sus_kstat}': {e}");
+        match api::add_sus_kstat(sus_kstat.as_str()) {
+            Ok(()) => {}
+            Err(e) if is_already_applied_error(&e) => {
+                info!("sus_kstat '{sus_kstat}' is already applied");
+            }
+            Err(e) => {
+                warn!("failed to add sus_kstat '{sus_kstat}': {e}");
+                success = false;
+            }
         }
     }
     for statically in &config.kstat.statically {
         if statically.path.trim().is_empty() {
             continue;
         }
-        if let Err(e) = api::add_sus_kstat_statically(
+        match api::add_sus_kstat_statically(
             &statically.path,
             &statically.ino,
             &statically.dev,
@@ -168,31 +230,66 @@ fn apply_sus_kstat_additions(config: &Data) {
             &statically.blocks,
             &statically.blksize,
         ) {
-            warn!(
-                "failed to add sus_kstat_statically '{}': {}",
-                statically.path, e
-            );
+            Ok(()) => {}
+            Err(e) if is_already_applied_error(&e) => {
+                info!("sus_kstat_statically '{}' is already applied", statically.path);
+            }
+            Err(e) => {
+                warn!(
+                    "failed to add sus_kstat_statically '{}': {}",
+                    statically.path, e
+                );
+                success = false;
+            }
         }
     }
+
+    success
 }
 
-fn apply_kstat_updates(config: &Data) {
+fn apply_kstat_updates(config: &Data) -> bool {
+    let mut success = true;
+
     for update_kstat in &config.kstat.update_kstat {
         if update_kstat.trim().is_empty() {
             continue;
         }
-        if let Err(e) = api::update_sus_kstat(update_kstat.as_str()) {
-            warn!("failed to update sus_kstat '{update_kstat}': {e}");
+        match api::update_sus_kstat(update_kstat.as_str()) {
+            Ok(()) => {}
+            Err(e) if is_already_applied_error(&e) => {
+                info!("sus_kstat '{update_kstat}' is already updated");
+            }
+            Err(e) => {
+                warn!("failed to update sus_kstat '{update_kstat}': {e}");
+                success = false;
+            }
         }
     }
     for full_clone in &config.kstat.full_clone {
         if full_clone.trim().is_empty() {
             continue;
         }
-        if let Err(e) = api::update_sus_kstat_full_clone(full_clone.as_str()) {
-            warn!("failed to update sus_kstat_full_clone '{full_clone}': {e}");
+        match api::update_sus_kstat_full_clone(full_clone.as_str()) {
+            Ok(()) => {}
+            Err(e) if is_already_applied_error(&e) => {
+                info!("sus_kstat_full_clone '{full_clone}' is already updated");
+            }
+            Err(e) => {
+                warn!("failed to update sus_kstat_full_clone '{full_clone}': {e}");
+                success = false;
+            }
         }
     }
+
+    success
+}
+
+fn is_already_applied_error(e: &anyhow::Error) -> bool {
+    let message = e.to_string();
+    message.contains("SuSFS error: -17")
+        || message.contains("SuSFS error: 17")
+        || message.contains("File exists")
+        || message.contains("os error 17")
 }
 
 fn user_0_ce_availability() -> CeAvailability {
@@ -214,19 +311,21 @@ fn is_false_property_value(value: &str) -> bool {
     value == "0" || value.eq_ignore_ascii_case("false")
 }
 
-fn has_ce_sensitive_config_entries() -> bool {
-    let config = config::read_config();
-    any_config_path(&config, is_user_ce_path)
+fn has_ce_sensitive_config_entries(config: &Data) -> bool {
+    any_config_path(config, is_user_ce_path)
 }
 
-fn is_configured_ce_path_available() -> bool {
-    let config = config::read_config();
-    any_config_path(&config, |path| is_user_ce_path(path) && Path::new(path).exists())
+fn is_configured_ce_path_available(config: &Data) -> bool {
+    any_config_path(config, |path| is_user_ce_path(path) && Path::new(path).exists())
 }
 
-fn is_user_0_ce_ready() -> bool {
+fn are_configured_paths_available(config: &Data) -> bool {
+    all_config_path(config, |path| Path::new(path).exists())
+}
+
+fn is_user_0_ce_ready(config: &Data) -> bool {
     matches!(user_0_ce_availability(), CeAvailability::Available)
-        || is_configured_ce_path_available()
+        || is_configured_ce_path_available(config)
         || is_user_0_unlocked_by_cmd()
 }
 
@@ -269,6 +368,34 @@ where
             .any(|entry| predicate(entry.path.trim()))
 }
 
+fn all_config_path<F>(config: &Data, mut predicate: F) -> bool
+where
+    F: FnMut(&str) -> bool,
+{
+    config
+        .sus_path
+        .sus_path
+        .iter()
+        .chain(config.sus_path.sus_path_loop.iter())
+        .chain(config.sus_map.iter())
+        .chain(config.kstat.sus_kstat.iter())
+        .chain(config.kstat.update_kstat.iter())
+        .chain(config.kstat.full_clone.iter())
+        .filter_map(|path| non_empty_path(path))
+        .all(|path| predicate(path))
+        && config
+            .kstat
+            .statically
+            .iter()
+            .filter_map(|entry| non_empty_path(&entry.path))
+            .all(|path| predicate(path))
+}
+
+fn non_empty_path(path: &str) -> Option<&str> {
+    let path = path.trim();
+    if path.is_empty() { None } else { Some(path) }
+}
+
 fn is_user_ce_path(path: &str) -> bool {
     let path = path.trim_end_matches('/');
     USER_0_CE_PATH_PREFIXES
@@ -294,14 +421,9 @@ fn wait_for_user_0_ce_available() {
         }
     }
 
-    let exit_code = if wait_for_user_0_ce_available_inner() {
-        apply_after_ce_available("user-0-ce-available");
-        0
-    } else {
-        0
-    };
+    let _ = wait_for_user_0_ce_available_inner();
     unsafe {
-        libc::_exit(exit_code);
+        libc::_exit(0);
     }
 }
 
@@ -310,7 +432,8 @@ fn wait_for_user_0_ce_available_inner() -> bool {
 
     info!("waiting for {USER_0_CE_AVAILABLE_PROP}, user unlock state, or configured CE paths");
     loop {
-        if is_user_0_ce_ready() {
+        let config = config::read_config();
+        if try_apply_after_ce_available(&config, "user-0-ce-available") {
             return true;
         }
 
