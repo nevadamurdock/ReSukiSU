@@ -918,6 +918,8 @@ private fun SegmentedColumnScope.backgroundAdjustmentControls(
                     checked = ThemeConfig.isEnableBlur,
                     onCheckedChange = { isChecked ->
                         BackgroundManager.saveEnableBlur(context, isChecked)
+                        if (!isChecked)
+                            BackgroundManager.saveEnableBlurExp(context, false)
                     }
                 )
             },
