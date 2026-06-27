@@ -177,7 +177,11 @@ pub fn on_services() {
 pub fn on_boot_completed() {
     ksucalls::report_boot_complete();
     // Load susfs boot-completed
-    let _ = crate::android::susfs::init_event::on_boot_completed();
+    let _ = std::thread::Builder::new()
+        .name("susfs".to_string())
+        .spawn(|| {
+            let _ = crate::android::susfs::init_event::on_boot_completed();
+        });
     info!("on_boot_completed triggered!");
 
     run_stage("boot-completed", false);
