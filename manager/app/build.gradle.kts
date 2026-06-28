@@ -113,6 +113,12 @@ android {
         generateLocaleConfig = true
     }
 
+    sourceSets {
+        getByName("main") {
+            java.exclude("com/resukisu/resukisu/ui/susfs/**")
+        }
+    }
+
     compileSdk = androidCompileSdkVersion
     ndkVersion = androidCompileNdkVersion
     buildToolsVersion = androidBuildToolsVersion
@@ -156,6 +162,14 @@ android {
     compileOptions {
         sourceCompatibility = androidSourceCompatibility
         targetCompatibility = androidTargetCompatibility
+    }
+}
+
+kotlin {
+    sourceSets {
+        getByName("main") {
+            kotlin.exclude("com/resukisu/resukisu/ui/susfs/**")
+        }
     }
 }
 
